@@ -108,10 +108,6 @@ public final class FdbLeaderElection implements LeaderElection {
     span.setAttribute("election.enabled", cfg.isElectionEnabled());
   }
 
-  // constructor defined above
-
-  // Configuration is validated/persisted in Elections factory.
-
   /**
    * {@inheritDoc}
    */

@@ -60,6 +60,16 @@ public final class Elections {
     return new FdbLeaderElection(cfg);
   }
 
+  /** Validate config and optionally start auto-heartbeat for a processId if enabled in config. */
+  public static LeaderElection createOrOpen(ElectionConfig cfg, String processId) {
+    LeaderElection le = createOrOpen(cfg);
+    if (cfg.isAutoHeartbeatEnabled()) {
+      le.startAutoHeartbeat(processId);
+      log.info("Started auto-heartbeat for processId={}", processId);
+    }
+    return le;
+  }
+
   /** Convenience overloads building a config first. */
   public static LeaderElection createOrOpen(Database db, Subspace subspace) {
     return createOrOpen(ElectionConfig.builder(db, subspace).build());
@@ -77,5 +87,20 @@ public final class Elections {
         .heartbeatTimeout(heartbeatTimeout)
         .electionEnabled(electionEnabled)
         .build());
+  }
+
+  /** Convenience overload with processId for auto-heartbeat. */
+  public static LeaderElection createOrOpen(Database db, Subspace subspace, String processId) {
+    return createOrOpen(ElectionConfig.builder(db, subspace).build(), processId);
+  }
+
+  public static LeaderElection createOrOpen(
+      Database db, Subspace subspace, Duration heartbeatTimeout, boolean electionEnabled, String processId) {
+    return createOrOpen(
+        ElectionConfig.builder(db, subspace)
+            .heartbeatTimeout(heartbeatTimeout)
+            .electionEnabled(electionEnabled)
+            .build(),
+        processId);
   }
 }
