@@ -25,6 +25,31 @@ java.time.Instant now = java.time.Instant.now();
 
 election.registerProcess(processId, now).join();
 boolean becameLeader = election.tryBecomeLeader(processId, now).join();
+
+// Auto Heartbeats
+// Enable automatic heartbeats (every half timeout) by setting the config flag and
+// supplying a process id at factory creation time. No Thread.sleep is used; the
+// loop leverages AsyncUtil.whileTrue and a delayed executor on the FDB executor.
+
+var cfgAuto = io.github.panghy.leaderelection.ElectionConfig.builder(db, dir)
+    .heartbeatTimeout(java.time.Duration.ofSeconds(10))
+    .electionEnabled(true)
+    .autoHeartbeatEnabled(true)
+    .build();
+
+// This will auto-start a background heartbeat loop for the given process id
+var election2 = io.github.panghy.leaderelection.Elections.createOrOpen(cfgAuto, processId);
+
+// Alternatively, start/stop the heartbeat manually
+var closer = election.startAutoHeartbeat(processId);
+// ... later ...
+closer.close();
+
+// Telemetry
+// Spans and metrics are emitted via OpenTelemetry using GlobalOpenTelemetry.
+// Spans include attributes:
+// - election.directory_path (human-readable DirectorySubspace path or hex subspace key)
+// - election.heartbeat_timeout.seconds, election.enabled, process.id (where applicable)
 ```
 
 ## Build

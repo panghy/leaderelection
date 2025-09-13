@@ -1,10 +1,13 @@
 package io.github.panghy.leaderelection;
 
+import static com.apple.foundationdb.async.AsyncUtil.whileTrue;
 import static io.github.panghy.leaderelection.Keys.configKey;
 import static io.github.panghy.leaderelection.Keys.leaderStateKey;
 import static io.github.panghy.leaderelection.Keys.processKey;
 import static io.github.panghy.leaderelection.Keys.processesRange;
 import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.concurrent.CompletableFuture.delayedExecutor;
+import static java.util.concurrent.CompletableFuture.supplyAsync;
 
 import com.apple.foundationdb.KeyValue;
 import com.apple.foundationdb.MutationType;
@@ -12,6 +15,7 @@ import com.apple.foundationdb.Range;
 import com.apple.foundationdb.ReadTransaction;
 import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.async.AsyncIterable;
+import com.apple.foundationdb.directory.DirectorySubspace;
 import com.apple.foundationdb.tuple.Tuple;
 import com.apple.foundationdb.tuple.Versionstamp;
 import io.opentelemetry.api.GlobalOpenTelemetry;
@@ -32,6 +36,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -89,7 +95,7 @@ public final class FdbLeaderElection implements LeaderElection {
   String directoryPathTag() {
     try {
       var sub = config.getSubspace();
-      if (sub instanceof com.apple.foundationdb.directory.DirectorySubspace ds) {
+      if (sub instanceof DirectorySubspace ds) {
         return String.join("/", ds.getPath());
       }
       byte[] key = sub.getKey();
@@ -338,17 +344,15 @@ public final class FdbLeaderElection implements LeaderElection {
   public AutoCloseable startAutoHeartbeat(String processId) {
     var db = config.getDatabase();
     var exec = db.getExecutor();
-    java.util.concurrent.atomic.AtomicBoolean running = new java.util.concurrent.atomic.AtomicBoolean(true);
+    AtomicBoolean running = new AtomicBoolean(true);
     long intervalMs = Math.max(1000L, config.getHeartbeatTimeout().toMillis() / 2);
-    java.util.concurrent.CompletableFuture<Void> loop = com.apple.foundationdb.async.AsyncUtil.whileTrue(
+    whileTrue(
         () -> {
-          java.time.Instant now = java.time.Instant.now();
+          Instant now = Instant.now();
           // run a heartbeat, then delay
           return heartbeat(processId, now)
-              .thenCompose(v -> java.util.concurrent.CompletableFuture.supplyAsync(
-                  () -> running.get(),
-                  java.util.concurrent.CompletableFuture.delayedExecutor(
-                      intervalMs, java.util.concurrent.TimeUnit.MILLISECONDS, exec)));
+              .thenCompose(v -> supplyAsync(
+                  running::get, delayedExecutor(intervalMs, TimeUnit.MILLISECONDS, exec)));
         },
         exec);
     return () -> {
