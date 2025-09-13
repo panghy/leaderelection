@@ -14,6 +14,14 @@ import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.async.AsyncIterable;
 import com.apple.foundationdb.tuple.Tuple;
 import com.apple.foundationdb.tuple.Versionstamp;
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.metrics.LongHistogram;
+import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.context.Scope;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.AbstractMap;
@@ -34,9 +42,30 @@ import org.slf4j.LoggerFactory;
 public final class FdbLeaderElection implements LeaderElection {
   private static final Logger log = LoggerFactory.getLogger(FdbLeaderElection.class);
   private final ElectionConfig config;
+  private final Tracer tracer;
+  private final Meter meter;
+  private final LongCounter registrations;
+  private final LongCounter heartbeats;
+  private final LongCounter leaderElected;
+  private final LongHistogram aliveProcesses;
 
   public FdbLeaderElection(ElectionConfig config) {
     this.config = Objects.requireNonNull(config);
+    this.tracer = GlobalOpenTelemetry.getTracer("io.github.panghy.leaderelection");
+    this.meter = GlobalOpenTelemetry.getMeter("io.github.panghy.leaderelection");
+    this.registrations = meter.counterBuilder("leader_election.registrations")
+        .setDescription("Total process registrations")
+        .build();
+    this.heartbeats = meter.counterBuilder("leader_election.heartbeats")
+        .setDescription("Total heartbeats")
+        .build();
+    this.leaderElected = meter.counterBuilder("leader_election.leader_elected")
+        .setDescription("Leadership acquisitions")
+        .build();
+    this.aliveProcesses = meter.histogramBuilder("leader_election.alive_processes")
+        .ofLongs()
+        .setDescription("Alive processes observed")
+        .build();
   }
 
   @Override
@@ -57,6 +86,28 @@ public final class FdbLeaderElection implements LeaderElection {
     });
   }
 
+  String directoryPathTag() {
+    try {
+      var sub = config.getSubspace();
+      if (sub instanceof com.apple.foundationdb.directory.DirectorySubspace ds) {
+        return String.join("/", ds.getPath());
+      }
+      byte[] key = sub.getKey();
+      StringBuilder sb = new StringBuilder(key.length * 2);
+      for (byte b : key) sb.append(String.format("%02x", b));
+      return sb.toString();
+    } catch (Throwable t) {
+      return "unknown";
+    }
+  }
+
+  private void setCommonAttrs(Span span, ElectionConfig cfg) {
+    span.setAttribute("election.directory_path", directoryPathTag());
+    span.setAttribute(
+        "election.heartbeat_timeout.seconds", cfg.getHeartbeatTimeout().getSeconds());
+    span.setAttribute("election.enabled", cfg.isElectionEnabled());
+  }
+
   // constructor defined above
 
   // Configuration is validated/persisted in Elections factory.
@@ -67,12 +118,24 @@ public final class FdbLeaderElection implements LeaderElection {
   @Override
   public CompletableFuture<Void> registerProcess(Transaction tr, String uuid, Instant now) {
     return loadConfig(tr).thenAccept(cfg -> {
-      if (!cfg.isElectionEnabled()) throw LeaderElectionException.electionDisabled();
-      byte[] key = processKey(config.getSubspace(), uuid);
-      long nanos = now.toEpochMilli() * 1_000_000L;
-      byte[] payload = Tuple.from(Versionstamp.incomplete(0), nanos).packWithVersionstamp();
-      tr.mutate(MutationType.SET_VERSIONSTAMPED_VALUE, key, payload);
-      log.debug("registerProcess uuid={} nanos={}", uuid, nanos);
+      Span span = tracer.spanBuilder("leaderElection.registerProcess").startSpan();
+      try (Scope ignored = span.makeCurrent()) {
+        setCommonAttrs(span, cfg);
+        span.setAttribute("process.id", uuid);
+        long nanos = now.toEpochMilli() * 1_000_000L;
+        byte[] key = processKey(config.getSubspace(), uuid);
+        byte[] payload = Tuple.from(Versionstamp.incomplete(0), nanos).packWithVersionstamp();
+        if (!cfg.isElectionEnabled()) throw LeaderElectionException.electionDisabled();
+        tr.mutate(MutationType.SET_VERSIONSTAMPED_VALUE, key, payload);
+        registrations.add(1);
+        log.debug("registerProcess uuid={} nanos={}", uuid, nanos);
+      } catch (RuntimeException e) {
+        span.recordException(e);
+        span.setStatus(StatusCode.ERROR);
+        throw e;
+      } finally {
+        span.end();
+      }
     });
   }
 
@@ -82,12 +145,24 @@ public final class FdbLeaderElection implements LeaderElection {
   @Override
   public CompletableFuture<Void> heartbeat(Transaction tr, String uuid, Instant now) {
     return loadConfig(tr).thenAccept(cfg -> {
-      if (!cfg.isElectionEnabled()) throw LeaderElectionException.electionDisabled();
-      byte[] key = processKey(config.getSubspace(), uuid);
-      long nanos = now.toEpochMilli() * 1_000_000L;
-      byte[] payload = Tuple.from(Versionstamp.incomplete(0), nanos).packWithVersionstamp();
-      tr.mutate(MutationType.SET_VERSIONSTAMPED_VALUE, key, payload);
-      log.debug("heartbeat uuid={} nanos={}", uuid, nanos);
+      Span span = tracer.spanBuilder("leaderElection.heartbeat").startSpan();
+      try (Scope ignored = span.makeCurrent()) {
+        setCommonAttrs(span, cfg);
+        span.setAttribute("process.id", uuid);
+        long nanos = now.toEpochMilli() * 1_000_000L;
+        byte[] key = processKey(config.getSubspace(), uuid);
+        byte[] payload = Tuple.from(Versionstamp.incomplete(0), nanos).packWithVersionstamp();
+        if (!cfg.isElectionEnabled()) throw LeaderElectionException.electionDisabled();
+        tr.mutate(MutationType.SET_VERSIONSTAMPED_VALUE, key, payload);
+        heartbeats.add(1);
+        log.debug("heartbeat uuid={} nanos={}", uuid, nanos);
+      } catch (RuntimeException e) {
+        span.recordException(e);
+        span.setStatus(StatusCode.ERROR);
+        throw e;
+      } finally {
+        span.end();
+      }
     });
   }
 
@@ -98,26 +173,38 @@ public final class FdbLeaderElection implements LeaderElection {
   public CompletableFuture<List<Map.Entry<String, ProcessDescriptor>>> findAliveProcesses(
       ReadTransaction tr, Instant now) {
     return loadConfig(tr).thenCompose(cfg -> {
-      Range r = processesRange(config.getSubspace());
-      AsyncIterable<KeyValue> it = tr.getRange(r);
-      return it.asList().thenApply(list -> {
-        List<Map.Entry<String, ProcessDescriptor>> alive = new ArrayList<>();
-        for (KeyValue kv : list) {
-          var keyT = config.getSubspace().unpack(kv.getKey());
-          String uuid = (String) keyT.get(1);
-          var valT = Tuple.fromBytes(kv.getValue());
-          Versionstamp vs = (Versionstamp) valT.get(0);
-          long tsNanos = (Long) valT.get(1);
-          Instant ts = Instant.ofEpochSecond(0L, tsNanos);
-          ProcessDescriptor desc = ProcessDescriptor.fromVersionstampAndTimestamp(vs.getBytes(), ts);
-          if (desc.isAlive(now, cfg.getHeartbeatTimeout())) {
-            alive.add(new AbstractMap.SimpleImmutableEntry<>(uuid, desc));
+      Span span = tracer.spanBuilder("leaderElection.findAliveProcesses").startSpan();
+      try (Scope ignored = span.makeCurrent()) {
+        setCommonAttrs(span, cfg);
+        Range r = processesRange(config.getSubspace());
+        AsyncIterable<KeyValue> it = tr.getRange(r);
+        return it.asList().thenApply(list -> {
+          List<Map.Entry<String, ProcessDescriptor>> alive = new ArrayList<>();
+          for (KeyValue kv : list) {
+            var keyT = config.getSubspace().unpack(kv.getKey());
+            String uuid = (String) keyT.get(1);
+            var valT = Tuple.fromBytes(kv.getValue());
+            Versionstamp vs = (Versionstamp) valT.get(0);
+            long tsNanos = (Long) valT.get(1);
+            Instant ts = Instant.ofEpochSecond(0L, tsNanos);
+            ProcessDescriptor desc = ProcessDescriptor.fromVersionstampAndTimestamp(vs.getBytes(), ts);
+            if (desc.isAlive(now, cfg.getHeartbeatTimeout())) {
+              alive.add(new AbstractMap.SimpleImmutableEntry<>(uuid, desc));
+            }
           }
-        }
-        alive.sort(Map.Entry.comparingByValue());
-        log.debug("findAliveProcesses count={}", alive.size());
-        return alive;
-      });
+          alive.sort(Map.Entry.comparingByValue());
+          span.setAttribute("alive.count", alive.size());
+          aliveProcesses.record(alive.size());
+          log.debug("findAliveProcesses count={}", alive.size());
+          return alive;
+        });
+      } catch (RuntimeException e) {
+        span.recordException(e);
+        span.setStatus(StatusCode.ERROR);
+        throw e;
+      } finally {
+        span.end();
+      }
     });
   }
 
@@ -127,23 +214,37 @@ public final class FdbLeaderElection implements LeaderElection {
   @Override
   public CompletableFuture<Boolean> tryBecomeLeader(Transaction tr, String uuid, Instant now) {
     return loadConfig(tr).thenCompose(cfg -> {
-      if (!cfg.isElectionEnabled()) throw LeaderElectionException.electionDisabled();
-      return findAliveProcesses(tr, now).thenCompose(alive -> {
-        if (!alive.isEmpty() && alive.get(0).getKey().equals(uuid)) {
-          ProcessDescriptor leader = alive.get(0).getValue();
-          return updateLeaderState(tr, leader)
-              .thenCompose(v -> evictDeadProcesses(tr, alive))
-              .thenApply(v -> {
-                log.info(
-                    "{} became leader (version={}, userVersion={})",
-                    uuid,
-                    leader.version,
-                    leader.userVersion);
-                return true;
-              });
-        }
-        return completedFuture(false);
-      });
+      Span span = tracer.spanBuilder("leaderElection.tryBecomeLeader").startSpan();
+      try (Scope ignored = span.makeCurrent()) {
+        setCommonAttrs(span, cfg);
+        span.setAttribute("process.id", uuid);
+        if (!cfg.isElectionEnabled()) throw LeaderElectionException.electionDisabled();
+        return findAliveProcesses(tr, now).thenCompose(alive -> {
+          if (!alive.isEmpty() && alive.get(0).getKey().equals(uuid)) {
+            ProcessDescriptor leader = alive.get(0).getValue();
+            span.setAttribute("leader.version", leader.version);
+            span.setAttribute("leader.user_version", leader.userVersion);
+            return updateLeaderState(tr, leader)
+                .thenCompose(v -> evictDeadProcesses(tr, alive))
+                .thenApply(v -> {
+                  leaderElected.add(1);
+                  log.info(
+                      "{} became leader (version={}, userVersion={})",
+                      uuid,
+                      leader.version,
+                      leader.userVersion);
+                  return true;
+                });
+          }
+          return completedFuture(false);
+        });
+      } catch (RuntimeException e) {
+        span.recordException(e);
+        span.setStatus(StatusCode.ERROR);
+        throw e;
+      } finally {
+        span.end();
+      }
     });
   }
 
@@ -175,16 +276,28 @@ public final class FdbLeaderElection implements LeaderElection {
   @Override
   public CompletableFuture<LeaderInfo> getCurrentLeader(ReadTransaction tr, Instant now) {
     byte[] key = leaderStateKey(config.getSubspace());
-    return loadConfig(tr).thenCompose(cfg -> tr.get(key).thenApply(val -> {
-      if (val == null) return null;
-      Tuple t = Tuple.fromBytes(val);
-      byte[] vsBytes = (byte[]) t.get(0);
-      long nanos = (Long) t.get(1);
-      ProcessDescriptor leader =
-          ProcessDescriptor.fromVersionstampAndTimestamp(vsBytes, Instant.ofEpochSecond(0L, nanos));
-      if (leader.isAlive(now, cfg.getHeartbeatTimeout())) return new LeaderInfo(leader);
-      return null;
-    }));
+    return loadConfig(tr).thenCompose(cfg -> {
+      Span span = tracer.spanBuilder("leaderElection.getCurrentLeader").startSpan();
+      try (Scope ignored = span.makeCurrent()) {
+        setCommonAttrs(span, cfg);
+        return tr.get(key).thenApply(val -> {
+          if (val == null) return null;
+          Tuple t = Tuple.fromBytes(val);
+          byte[] vsBytes = (byte[]) t.get(0);
+          long nanos = (Long) t.get(1);
+          ProcessDescriptor leader =
+              ProcessDescriptor.fromVersionstampAndTimestamp(vsBytes, Instant.ofEpochSecond(0L, nanos));
+          if (leader.isAlive(now, cfg.getHeartbeatTimeout())) return new LeaderInfo(leader);
+          return null;
+        });
+      } catch (RuntimeException e) {
+        span.recordException(e);
+        span.setStatus(StatusCode.ERROR);
+        throw e;
+      } finally {
+        span.end();
+      }
+    });
   }
 
   /**
@@ -193,24 +306,35 @@ public final class FdbLeaderElection implements LeaderElection {
   @Override
   public CompletableFuture<Boolean> isLeader(ReadTransaction tr, String uuid, Instant now) {
     return loadConfig(tr).thenCompose(cfg -> {
-      if (!cfg.isElectionEnabled()) throw LeaderElectionException.electionDisabled();
-      return getCurrentLeader(tr, now).thenCompose(info -> {
-        if (info != null) {
-          byte[] pKey = processKey(config.getSubspace(), uuid);
-          return tr.get(pKey).thenApply(val -> {
-            if (val == null) return false;
-            Tuple t = Tuple.fromBytes(val);
-            Versionstamp vs = (Versionstamp) t.get(0);
-            long nanos = (Long) t.get(1);
-            ProcessDescriptor self = ProcessDescriptor.fromVersionstampAndTimestamp(
-                vs.getBytes(), Instant.ofEpochSecond(0L, nanos));
-            return self.equals(info.leader());
-          });
-        }
-        return findAliveProcesses(tr, now)
-            .thenApply(alive ->
-                !alive.isEmpty() && alive.get(0).getKey().equals(uuid));
-      });
+      Span span = tracer.spanBuilder("leaderElection.isLeader").startSpan();
+      try (Scope ignored = span.makeCurrent()) {
+        setCommonAttrs(span, cfg);
+        span.setAttribute("process.id", uuid);
+        if (!cfg.isElectionEnabled()) throw LeaderElectionException.electionDisabled();
+        return getCurrentLeader(tr, now).thenCompose(info -> {
+          if (info != null) {
+            byte[] pKey = processKey(config.getSubspace(), uuid);
+            return tr.get(pKey).thenApply(val -> {
+              if (val == null) return false;
+              Tuple t = Tuple.fromBytes(val);
+              Versionstamp vs = (Versionstamp) t.get(0);
+              long nanos = (Long) t.get(1);
+              ProcessDescriptor self = ProcessDescriptor.fromVersionstampAndTimestamp(
+                  vs.getBytes(), Instant.ofEpochSecond(0L, nanos));
+              return self.equals(info.leader());
+            });
+          }
+          return findAliveProcesses(tr, now)
+              .thenApply(alive ->
+                  !alive.isEmpty() && alive.get(0).getKey().equals(uuid));
+        });
+      } catch (RuntimeException e) {
+        span.recordException(e);
+        span.setStatus(StatusCode.ERROR);
+        throw e;
+      } finally {
+        span.end();
+      }
     });
   }
 }

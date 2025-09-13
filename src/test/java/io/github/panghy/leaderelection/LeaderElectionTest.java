@@ -86,6 +86,9 @@ class LeaderElectionTest {
 
     boolean p1Leader = election.tryBecomeLeader(p1, t0).get(5, TimeUnit.SECONDS);
     assertThat(p1Leader).isTrue();
+    // Loser path
+    boolean p2Leader = election.tryBecomeLeader(p2, t0).get(5, TimeUnit.SECONDS);
+    assertThat(p2Leader).isFalse();
 
     LeaderInfo info = election.getCurrentLeader(t0).get(5, TimeUnit.SECONDS);
     assertThat(info).isNotNull();
@@ -190,5 +193,21 @@ class LeaderElectionTest {
     assertThatThrownBy(() -> election.tryBecomeLeader("x", Instant.now()).join())
         .hasCauseInstanceOf(LeaderElectionException.class)
         .hasMessageContaining("disabled");
+  }
+
+  @Test
+  void instrumentationCoverage() throws Exception {
+    // Exercise findAliveProcesses and negative isLeader
+    String x = "x";
+    Instant t0 = Instant.ofEpochMilli(5_000);
+    election.registerProcess(x, t0).get(5, TimeUnit.SECONDS);
+    election.heartbeat(x, t0.plusSeconds(1)).get(5, TimeUnit.SECONDS);
+    var alive = db.readAsync(tr -> election.findAliveProcesses(tr, t0.plusSeconds(1)))
+        .get(5, TimeUnit.SECONDS);
+    assertThat(alive.size()).isGreaterThanOrEqualTo(1);
+    var alive2 = election.findAliveProcesses(t0.plusSeconds(1)).get(5, TimeUnit.SECONDS);
+    assertThat(alive2.size()).isGreaterThanOrEqualTo(1);
+    Boolean notLeader = election.isLeader("non-existent", t0.plusSeconds(1)).get(5, TimeUnit.SECONDS);
+    assertThat(notLeader).isFalse();
   }
 }

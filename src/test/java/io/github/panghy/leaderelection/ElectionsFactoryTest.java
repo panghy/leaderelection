@@ -54,5 +54,12 @@ class ElectionsFactoryTest {
     le.registerProcess(id, now).get(5, TimeUnit.SECONDS);
     boolean became = le.tryBecomeLeader(id, now).get(5, TimeUnit.SECONDS);
     assertThat(became).isTrue();
+
+    // Idempotent open with same config should succeed without overwrite
+    LeaderElection le2 = Elections.createOrOpen(ElectionConfig.builder(db, dir)
+        .heartbeatTimeout(java.time.Duration.ofSeconds(10))
+        .electionEnabled(true)
+        .build());
+    assertThat(le2).isNotNull();
   }
 }
