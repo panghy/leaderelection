@@ -1,0 +1,164 @@
+import com.vanniktech.maven.publish.SonatypeHost
+
+buildscript {
+  dependencies {
+    classpath 'com.palantir.javaformat:gradle-palantir-java-format:2.72.0'
+  }
+}
+
+plugins {
+  id 'java-library'
+  id 'maven-publish'
+  id 'signing'
+  id 'jacoco'
+  id 'com.diffplug.spotless' version '6.25.0'
+  id 'com.vanniktech.maven.publish' version '0.33.0'
+}
+
+allprojects {
+  apply plugin: 'com.palantir.java-format'
+}
+
+group = 'io.github.panghy'
+version = '0.1.0-SNAPSHOT'
+
+def javaVersion = 17
+
+java {
+  sourceCompatibility = JavaVersion.VERSION_17
+  targetCompatibility = JavaVersion.VERSION_17
+  toolchain {
+    languageVersion = JavaLanguageVersion.of(javaVersion)
+  }
+}
+
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  // FoundationDB
+  implementation 'org.foundationdb:fdb-java:7.3.27'
+
+  // Logging
+  implementation 'org.slf4j:slf4j-api:2.0.12'
+
+  // OpenTelemetry (optional API parity with taskqueue)
+  implementation 'io.opentelemetry:opentelemetry-api:1.40.0'
+  implementation 'io.opentelemetry:opentelemetry-context:1.40.0'
+
+  // Lombok (optional)
+  compileOnly 'org.projectlombok:lombok:1.18.28'
+  annotationProcessor 'org.projectlombok:lombok:1.18.28'
+
+  // Testing
+  testImplementation 'org.junit.jupiter:junit-jupiter:5.10.1'
+  testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+  testImplementation 'org.assertj:assertj-core:3.25.1'
+  testImplementation 'org.mockito:mockito-core:5.19.0'
+  testImplementation 'org.mockito:mockito-junit-jupiter:5.19.0'
+  testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.9'
+}
+
+sourceSets {
+  main {
+    java {
+      srcDir 'src/main/java'
+    }
+  }
+  test {
+    java {
+      srcDir 'src/test/java'
+    }
+  }
+}
+
+test {
+  useJUnitPlatform()
+  finalizedBy jacocoTestReport
+}
+
+// Spotless configuration with Palantir Java Format
+spotless {
+  java {
+    target 'src/**/*.java'
+    targetExclude 'build/**'
+    indentWithTabs(4)
+    indentWithSpaces(2)
+    removeUnusedImports()
+    trimTrailingWhitespace()
+    endWithNewline()
+  }
+}
+
+compileJava.dependsOn 'spotlessApply'
+
+// JaCoCo configuration
+jacoco {
+  toolVersion = "0.8.13"
+}
+
+jacocoTestReport {
+  dependsOn test
+  reports {
+    xml.required = true
+    html.required = true
+  }
+}
+
+jacocoTestCoverageVerification {
+  violationRules {
+    rule {
+      limit {
+        counter = 'LINE'
+        value = 'COVEREDRATIO'
+        minimum = 0.90 // 90% line coverage
+      }
+      limit {
+        counter = 'BRANCH'
+        value = 'COVEREDRATIO'
+        minimum = 0.75 // 75% branch coverage
+      }
+    }
+  }
+}
+
+check.dependsOn jacocoTestCoverageVerification
+
+// Maven publishing configuration (metadata placeholder)
+mavenPublishing {
+  publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
+  signAllPublications()
+
+  pom {
+    name = 'LeaderElection'
+    description = 'A FoundationDB-backed leader election library'
+    url = 'https://github.com/panghy/leaderelection'
+
+    licenses {
+      license {
+        name = 'The Apache License, Version 2.0'
+        url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+      }
+    }
+
+    developers {
+      developer {
+        id = 'panghy'
+        name = 'Clement Pang'
+        email = 'panghy@users.noreply.github.com'
+      }
+    }
+
+    scm {
+      connection = 'scm:git:git://github.com/panghy/leaderelection.git'
+      developerConnection = 'scm:git:ssh://github.com:panghy/leaderelection.git'
+      url = 'https://github.com/panghy/leaderelection'
+    }
+  }
+}
+
+// Avoid duplicate entries when sources are collected from multiple directories
+tasks.withType(Jar).configureEach {
+  duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
