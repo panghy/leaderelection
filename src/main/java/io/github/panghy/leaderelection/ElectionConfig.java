@@ -21,13 +21,15 @@ public final class ElectionConfig {
   private final Duration heartbeatTimeout;
   private final boolean electionEnabled;
   private final boolean overwriteExistingConfig;
+  private final boolean autoHeartbeatEnabled;
 
   private ElectionConfig(
       Database database,
       Subspace subspace,
       Duration heartbeatTimeout,
       boolean electionEnabled,
-      boolean overwriteExistingConfig) {
+      boolean overwriteExistingConfig,
+      boolean autoHeartbeatEnabled) {
     this.database = Objects.requireNonNull(database, "database");
     this.subspace = Objects.requireNonNull(subspace, "subspace");
     if (heartbeatTimeout == null || heartbeatTimeout.isNegative() || heartbeatTimeout.isZero()) {
@@ -36,6 +38,7 @@ public final class ElectionConfig {
     this.heartbeatTimeout = heartbeatTimeout;
     this.electionEnabled = electionEnabled;
     this.overwriteExistingConfig = overwriteExistingConfig;
+    this.autoHeartbeatEnabled = autoHeartbeatEnabled;
   }
 
   /** Builder entrypoint. */
@@ -63,12 +66,18 @@ public final class ElectionConfig {
     return overwriteExistingConfig;
   }
 
+  /** If true, library helper can run an automatic heartbeat loop. */
+  public boolean isAutoHeartbeatEnabled() {
+    return autoHeartbeatEnabled;
+  }
+
   public static final class Builder {
     private final Database database;
     private final Subspace subspace;
     private Duration heartbeatTimeout = DEFAULT_HEARTBEAT_TIMEOUT;
     private boolean electionEnabled = true;
     private boolean overwriteExistingConfig = false;
+    private boolean autoHeartbeatEnabled = false;
 
     private Builder(Database database, Subspace subspace) {
       this.database = database;
@@ -91,8 +100,20 @@ public final class ElectionConfig {
       return this;
     }
 
+    /** Enable a background heartbeat loop via startAutoHeartbeat(). */
+    public Builder autoHeartbeatEnabled(boolean enabled) {
+      this.autoHeartbeatEnabled = enabled;
+      return this;
+    }
+
     public ElectionConfig build() {
-      return new ElectionConfig(database, subspace, heartbeatTimeout, electionEnabled, overwriteExistingConfig);
+      return new ElectionConfig(
+          database,
+          subspace,
+          heartbeatTimeout,
+          electionEnabled,
+          overwriteExistingConfig,
+          autoHeartbeatEnabled);
     }
   }
 }

@@ -138,4 +138,11 @@ public interface LeaderElection {
   default CompletableFuture<Boolean> isLeader(String processId, Instant now) {
     return readAsync(tr -> isLeader(tr, processId, now));
   }
+
+  /**
+   * Start an automatic heartbeat loop for the given process id. The loop sends a heartbeat every
+   * half of the configured timeout (e.g., default 5s) using a delayed executor (no Thread.sleep).
+   * Returns an {@link AutoCloseable} that cancels the loop when {@code close()} is called.
+   */
+  AutoCloseable startAutoHeartbeat(String processId);
 }

@@ -337,4 +337,27 @@ public final class FdbLeaderElection implements LeaderElection {
       }
     });
   }
+
+  @Override
+  public AutoCloseable startAutoHeartbeat(String processId) {
+    var db = config.getDatabase();
+    var exec = db.getExecutor();
+    java.util.concurrent.atomic.AtomicBoolean running = new java.util.concurrent.atomic.AtomicBoolean(true);
+    long intervalMs = Math.max(1000L, config.getHeartbeatTimeout().toMillis() / 2);
+    java.util.concurrent.CompletableFuture<Void> loop = com.apple.foundationdb.async.AsyncUtil.whileTrue(
+        () -> {
+          java.time.Instant now = java.time.Instant.now();
+          // run a heartbeat, then delay
+          return heartbeat(processId, now)
+              .thenCompose(v -> java.util.concurrent.CompletableFuture.supplyAsync(
+                  () -> running.get(),
+                  java.util.concurrent.CompletableFuture.delayedExecutor(
+                      intervalMs, java.util.concurrent.TimeUnit.MILLISECONDS, exec)));
+        },
+        exec);
+    return () -> {
+      running.set(false);
+      // Do not block; loop will exit after next delay tick
+    };
+  }
 }
