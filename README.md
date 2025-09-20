@@ -350,4 +350,4 @@ All tests use simulated time (no `Thread.sleep()`) for reliable and fast executi
 
 ## License
 
-This project is licensed under the Apache License 2.0.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
